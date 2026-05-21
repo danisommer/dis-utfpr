@@ -129,10 +129,22 @@ def reconstruct() -> tuple:
     elif "H_path" in payload and payload["H_path"]:
         H = _load_H(payload["H_path"])
     else:
-        default_path = os.environ.get(
-            f"H_MODEL_{model}_PATH",
-            os.path.join("data", f"H_modelo_{model}.npy"),
-        )
+        default_path = os.environ.get(f"H_MODEL_{model}_PATH")
+        if not default_path:
+            for cand in (
+                os.path.join("data", f"H-{model}.npy"),
+                os.path.join("data", f"H-{model}.csv"),
+                os.path.join("data", f"H_modelo_{model}.npy"),
+                os.path.join("data", f"H_modelo_{model}.csv"),
+            ):
+                if os.path.exists(cand):
+                    default_path = cand
+                    break
+        if not default_path:
+            return (
+                jsonify({"error": f"matriz H do modelo {model} nao encontrada em ./data"}),
+                500,
+            )
         H = _load_H(default_path)
 
     if apply_gain:

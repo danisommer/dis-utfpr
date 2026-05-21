@@ -189,8 +189,14 @@ A especificação completa do protocolo está em [`shared/protocol.md`](shared/p
 - **N** = 64 sensores
 - Imagens de teste: `img1`, `img2`, `img3` (30×30 px)
 
-> Os arquivos de dados (`H` e `g`) são fornecidos pelo professor via Moodle.
-> Veja [`data/README_DADOS.md`](data/README_DADOS.md) para instruções de instalação.
+> Os arquivos de dados (`H`, `g`, `A`, `F`) são fornecidos pelo professor via Moodle.
+> Veja [`data/README_DADOS.md`](data/README_DADOS.md) para a convenção de nomes e instruções de instalação.
+>
+> **Resumo da convenção:**
+> - `H-1.csv` / `H-2.csv` → matrizes de modelo
+> - `G-*.csv` / `g-30x30-*.csv` → sinais brutos (cliente envia `apply_gain=true`)
+> - `A-*.csv` → sinais com ganho já aplicado (cliente envia `apply_gain=false`)
+> - `F-*.png` / `f-30x30-*.png` → imagens ground-truth para comparação
 
 ---
 

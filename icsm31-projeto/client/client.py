@@ -23,6 +23,7 @@ import random
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 
@@ -30,6 +31,14 @@ import numpy as np
 import requests
 
 from report_generator import ReconstructionResult, generate_report
+
+
+@dataclass
+class SignalFile:
+    """Sinal de teste pronto para envio."""
+
+    path: str
+    apply_gain: bool  # True se o sinal e bruto e precisa de ganho
 
 LOG = logging.getLogger("client")
 logging.basicConfig(
@@ -55,30 +64,65 @@ def _load_signal(path: str) -> np.ndarray:
     return np.loadtxt(path, dtype=np.float64).ravel()
 
 
-def _discover_signals(data_dir: str, model: int) -> List[str]:
-    """Procura arquivos de sinal compativeis com o modelo dado.
+def _discover_signals(data_dir: str, model: int) -> List[SignalFile]:
+    """Descobre sinais de teste para o modelo dado.
 
-    Convencoes aceitas:
-        - data/sinais_modelo_<M>/*.npy
-        - data/g_modelo_<M>_*.npy ou .csv
+    Convencao dos arquivos do professor:
+        Modelo 1 (60x60):
+            - G-*.csv          -> sinais brutos          (apply_gain=True)
+            - A-60x60-*.csv    -> sinais com ganho ja aplicado (apply_gain=False)
+        Modelo 2 (30x30):
+            - g-30x30-*.csv    -> sinais brutos          (apply_gain=True)
+            - A-30x30-*.csv    -> sinais com ganho ja aplicado (apply_gain=False)
+
+    Tambem aceita .npy nas mesmas nomenclaturas para quem pre-converter.
     """
-    candidates: List[str] = []
-    sub = os.path.join(data_dir, f"sinais_modelo_{model}")
-    if os.path.isdir(sub):
-        for fn in sorted(os.listdir(sub)):
-            if fn.endswith((".npy", ".csv", ".txt")):
-                candidates.append(os.path.join(sub, fn))
-    for fn in sorted(os.listdir(data_dir)) if os.path.isdir(data_dir) else []:
-        if fn.startswith(f"g_modelo_{model}") and fn.endswith((".npy", ".csv", ".txt")):
-            candidates.append(os.path.join(data_dir, fn))
-    return candidates
+    if not os.path.isdir(data_dir):
+        return []
+
+    exts = (".csv", ".npy", ".txt")
+    files = sorted(os.listdir(data_dir))
+
+    def _is_signal(fn: str) -> bool:
+        return fn.lower().endswith(exts)
+
+    found: List[SignalFile] = []
+
+    if model == 1:
+        for fn in files:
+            if not _is_signal(fn):
+                continue
+            low = fn.lower()
+            if low.startswith("g-") and not low.startswith("g-30x30"):
+                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=True))
+            elif low.startswith("a-60x60"):
+                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=False))
+    elif model == 2:
+        for fn in files:
+            if not _is_signal(fn):
+                continue
+            low = fn.lower()
+            if low.startswith("g-30x30"):
+                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=True))
+            elif low.startswith("a-30x30"):
+                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=False))
+    return found
 
 
-def _resolve_h_path(data_dir: str, model: int, prefer_csv: bool) -> Optional[str]:
-    """Resolve o caminho do arquivo H apropriado para o servidor."""
-    ext_pref = ("csv", "npy") if prefer_csv else ("npy", "csv")
-    for ext in ext_pref:
-        p = os.path.join(data_dir, f"H_modelo_{model}.{ext}")
+def _resolve_h_path(data_dir: str, model: int) -> Optional[str]:
+    """Resolve o caminho do arquivo H para o modelo (padroes do professor).
+
+    Procura, em ordem: H-<model>.npy (mais rapido), H-<model>.csv,
+    e os nomes alternativos H_modelo_<model>.npy/.csv.
+    """
+    candidates = [
+        f"H-{model}.npy",
+        f"H-{model}.csv",
+        f"H_modelo_{model}.npy",
+        f"H_modelo_{model}.csv",
+    ]
+    for name in candidates:
+        p = os.path.join(data_dir, name)
         if os.path.exists(p):
             return os.path.abspath(p)
     return None
@@ -93,13 +137,14 @@ def _send_one(
     h_path: Optional[str],
     request_id: str,
     timeout_s: float,
+    apply_gain: bool,
 ) -> Optional[ReconstructionResult]:
     """Envia uma requisicao para um servidor e devolve o resultado."""
     payload = {
         "g": g.tolist(),
         "algorithm": algorithm,
         "model": model,
-        "apply_gain": True,
+        "apply_gain": apply_gain,
     }
     if h_path:
         payload["H_path"] = h_path
@@ -183,21 +228,32 @@ def run_rounds(
                 )
                 continue
 
-            signal_path = rng.choice(signals)
+            signal = rng.choice(signals)
             try:
-                g = _load_signal(signal_path)
+                g = _load_signal(signal.path)
             except Exception as exc:  # noqa: BLE001
-                LOG.error("[%s] erro lendo %s: %s", request_id, signal_path, exc)
+                LOG.error("[%s] erro lendo %s: %s", request_id, signal.path, exc)
+                continue
+
+            h_path = _resolve_h_path(data_dir, model)
+            if h_path is None:
+                LOG.warning(
+                    "[%s] matriz H nao encontrada para modelo %d em %s — pulando",
+                    request_id,
+                    model,
+                    data_dir,
+                )
                 continue
 
             LOG.info(
-                "[%s] rodada %d/%d modelo=%d algo=%s sinal=%s",
+                "[%s] rodada %d/%d modelo=%d algo=%s sinal=%s ganho=%s",
                 request_id,
                 round_idx,
                 rounds,
                 model,
                 algorithm,
-                os.path.basename(signal_path),
+                os.path.basename(signal.path),
+                "sim" if signal.apply_gain else "ja_aplicado",
             )
 
             futs = {
@@ -208,9 +264,10 @@ def run_rounds(
                     g,
                     algorithm,
                     model,
-                    _resolve_h_path(data_dir, model, prefer_csv=(name == "go")),
+                    h_path,
                     request_id,
                     timeout_s,
+                    signal.apply_gain,
                 ): name
                 for name, url in SERVERS.items()
             }

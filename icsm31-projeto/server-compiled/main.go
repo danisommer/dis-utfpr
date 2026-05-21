@@ -137,7 +137,15 @@ func defaultHPath(model int) string {
 	if env := os.Getenv(fmt.Sprintf("H_MODEL_%d_PATH", model)); env != "" {
 		return env
 	}
-	return fmt.Sprintf("data/H_modelo_%d.csv", model)
+	for _, cand := range []string{
+		fmt.Sprintf("data/H-%d.csv", model),
+		fmt.Sprintf("data/H_modelo_%d.csv", model),
+	} {
+		if _, err := os.Stat(cand); err == nil {
+			return cand
+		}
+	}
+	return fmt.Sprintf("data/H-%d.csv", model)
 }
 
 func reconstructHandler(w http.ResponseWriter, r *http.Request) {
