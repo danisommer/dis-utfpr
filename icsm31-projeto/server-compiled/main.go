@@ -29,8 +29,10 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
@@ -63,18 +65,72 @@ type reconstructRequest struct {
 }
 
 type reconstructResponse struct {
-	Algorithm           string  `json:"algorithm"`
-	ImageBase64         string  `json:"image_base64"`
-	Width               int     `json:"width"`
-	Height              int     `json:"height"`
-	NIter               int     `json:"n_iter"`
-	TempoReconstrucaoS  float64 `json:"tempo_reconstrucao_s"`
-	StartedAt           string  `json:"started_at"`
-	FinishedAt          string  `json:"finished_at"`
-	Server              string  `json:"server"`
+	Algorithm          string  `json:"algorithm"`
+	ImageBase64        string  `json:"image_base64"`
+	Width              int     `json:"width"`
+	Height             int     `json:"height"`
+	NIter              int     `json:"n_iter"`
+	TempoReconstrucaoS float64 `json:"tempo_reconstrucao_s"`
+	ReductionFactor    float64 `json:"reduction_factor"`
+	LambdaReg          float64 `json:"lambda_reg"`
+	StartedAt          string  `json:"started_at"`
+	FinishedAt         string  `json:"finished_at"`
+	Server             string  `json:"server"`
 }
 
-func vectorToPNG(f *mat.VecDense, width, height int) ([]byte, error) {
+// textPair representa um chunk tEXt (keyword -> texto) a ser embutido no PNG.
+type textPair struct {
+	key string
+	val string
+}
+
+// addPNGText insere chunks tEXt antes do primeiro chunk IDAT de um PNG ja
+// codificado. O encoder padrao do Go (image/png) nao escreve tEXt, entao
+// fazemos a insercao manual respeitando o formato: len(4) tipo(4) dados crc(4).
+// A insercao antes do IDAT (e nao do IEND) garante que leitores que so
+// processam chunks ate a imagem (ex.: PIL em modo lazy) tambem enxerguem os
+// metadados — mesmo comportamento do servidor Python.
+func addPNGText(pngBytes []byte, texts []textPair) []byte {
+	const sigLen = 8
+	if len(pngBytes) < sigLen+12 || len(texts) == 0 {
+		return pngBytes
+	}
+
+	// localiza o inicio do primeiro chunk IDAT.
+	idatPos := bytes.Index(pngBytes, []byte("IDAT"))
+	if idatPos < 4 {
+		return pngBytes
+	}
+	insertAt := idatPos - 4 // inicio do campo length do chunk IDAT
+
+	var chunks bytes.Buffer
+	for _, t := range texts {
+		var data bytes.Buffer
+		data.WriteString(t.key)
+		data.WriteByte(0) // separador nulo entre keyword e texto
+		data.WriteString(t.val)
+		raw := data.Bytes()
+
+		var lenBuf [4]byte
+		binary.BigEndian.PutUint32(lenBuf[:], uint32(len(raw)))
+		chunks.Write(lenBuf[:])
+
+		typeAndData := append([]byte("tEXt"), raw...)
+		chunks.Write(typeAndData)
+
+		var crcBuf [4]byte
+		binary.BigEndian.PutUint32(crcBuf[:], crc32.ChecksumIEEE(typeAndData))
+		chunks.Write(crcBuf[:])
+	}
+
+	out := make([]byte, 0, len(pngBytes)+chunks.Len())
+	out = append(out, pngBytes[:insertAt]...)
+	out = append(out, chunks.Bytes()...)
+	out = append(out, pngBytes[insertAt:]...)
+	return out
+}
+
+func vectorToPNG(f *mat.VecDense, width, height int, texts []textPair) ([]byte, error) {
 	n := f.Len()
 	if n != width*height {
 		return nil, fmt.Errorf("dimensao incorreta: %d != %d*%d", n, width, height)
@@ -115,7 +171,7 @@ func vectorToPNG(f *mat.VecDense, width, height int) ([]byte, error) {
 	if err := png.Encode(&buf, img); err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	return addPNGText(buf.Bytes(), texts), nil
 }
 
 func denseFromRows(rows [][]float64) (*mat.Dense, error) {
@@ -175,6 +231,7 @@ func reconstructHandler(w http.ResponseWriter, r *http.Request) {
 	g := mat.NewVecDense(len(req.G), append([]float64(nil), req.G...))
 
 	var H *mat.Dense
+	var hKey string
 	switch {
 	case len(req.H) > 0:
 		d, err := denseFromRows(req.H)
@@ -184,14 +241,16 @@ func reconstructHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		H = d
 	case req.HPath != "":
-		d, err := LoadH(req.HPath)
+		hKey = req.HPath
+		d, err := LoadH(hKey)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		H = d
 	default:
-		d, err := LoadH(defaultHPath(req.Model))
+		hKey = defaultHPath(req.Model)
+		d, err := LoadH(hKey)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -206,6 +265,11 @@ func reconstructHandler(w http.ResponseWriter, r *http.Request) {
 	if applyGain {
 		ApplySignalGain(g, cfg.S, cfg.N)
 	}
+
+	// Parametros do enunciado: c = ||H^T H||_2 (cacheado por H) e
+	// lambda = max(abs(H^T g)) * 0.10 (com o sinal ja com ganho).
+	cReduction := ReductionFactor(H, hKey)
+	lambdaReg := RegularizationLambda(H, g)
 
 	algo := strings.ToLower(strings.TrimSpace(req.Algorithm))
 	started := time.Now().UTC()
@@ -227,7 +291,18 @@ func reconstructHandler(w http.ResponseWriter, r *http.Request) {
 
 	finished := time.Now().UTC()
 
-	pngBytes, err := vectorToPNG(f, cfg.W, cfg.H)
+	metadata := []textPair{
+		{"algorithm", strings.ToUpper(algo)},
+		{"started_at", started.Format(time.RFC3339Nano)},
+		{"finished_at", finished.Format(time.RFC3339Nano)},
+		{"size", fmt.Sprintf("%dx%d", cfg.W, cfg.H)},
+		{"iterations", fmt.Sprintf("%d", nIter)},
+		{"reduction_factor", fmt.Sprintf("%.6g", cReduction)},
+		{"lambda_reg", fmt.Sprintf("%.6g", lambdaReg)},
+		{"server", "go"},
+	}
+
+	pngBytes, err := vectorToPNG(f, cfg.W, cfg.H, metadata)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("falha ao gerar PNG: %v", err), http.StatusInternalServerError)
 		return
@@ -240,6 +315,8 @@ func reconstructHandler(w http.ResponseWriter, r *http.Request) {
 		Height:             cfg.H,
 		NIter:              nIter,
 		TempoReconstrucaoS: dur.Seconds(),
+		ReductionFactor:    cReduction,
+		LambdaReg:          lambdaReg,
 		StartedAt:          started.Format(time.RFC3339Nano),
 		FinishedAt:         finished.Format(time.RFC3339Nano),
 		Server:             "go",
@@ -250,8 +327,8 @@ func reconstructHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("falha encode: %v", err)
 	}
 
-	log.Printf("reconstruct ok algo=%s model=%d iter=%d tempo=%.4fs",
-		algo, req.Model, nIter, dur.Seconds())
+	log.Printf("reconstruct ok algo=%s model=%d iter=%d tempo=%.4fs c=%.4g lambda=%.4g",
+		algo, req.Model, nIter, dur.Seconds(), cReduction, lambdaReg)
 }
 
 func healthHandler(w http.ResponseWriter, _ *http.Request) {

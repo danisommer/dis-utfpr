@@ -53,7 +53,8 @@ func CGNR(H *mat.Dense, g *mat.VecDense, maxIter int, tol float64) (*mat.VecDens
 	p := mat.VecDenseCopyOf(z)
 
 	zNormSq := mat.Dot(z, z)
-	prevRNormSq := mat.Dot(r, r)
+	// epsilon = ||r_i+1||_2 - ||r_i||_2 (diferenca de normas, conforme enunciado)
+	prevRNorm := math.Sqrt(mat.Dot(r, r))
 
 	nIter := 0
 	w := mat.NewVecDense(H.RawMatrix().Rows, nil)
@@ -73,12 +74,12 @@ func CGNR(H *mat.Dense, g *mat.VecDense, maxIter int, tol float64) (*mat.VecDens
 		f.AddScaledVec(f, alpha, p)
 		r.AddScaledVec(r, -alpha, w)
 
-		newRNormSq := mat.Dot(r, r)
-		epsilon := newRNormSq - prevRNormSq
+		newRNorm := math.Sqrt(mat.Dot(r, r))
+		epsilon := newRNorm - prevRNorm
 		if math.Abs(epsilon) < tol {
 			break
 		}
-		prevRNormSq = newRNormSq
+		prevRNorm = newRNorm
 
 		zNext.MulVec(H.T(), r)
 		zNextNormSq := mat.Dot(zNext, zNext)

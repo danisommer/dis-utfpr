@@ -46,6 +46,8 @@ class ReconstructionResult:
     image_png_bytes: bytes
     model: int
     request_id: str
+    reduction_factor: float = 0.0
+    lambda_reg: float = 0.0
 
 
 def _render_table(rec: ReconstructionResult) -> Table:
@@ -56,6 +58,8 @@ def _render_table(rec: ReconstructionResult) -> Table:
         ["Tamanho", f"{rec.width} x {rec.height}"],
         ["Iteracoes", str(rec.n_iter)],
         ["Tempo (s)", f"{rec.tempo_reconstrucao_s:.4f}"],
+        ["c = ||H^T H||_2", f"{rec.reduction_factor:.6g}"],
+        ["lambda", f"{rec.lambda_reg:.6g}"],
         ["Inicio", rec.started_at],
         ["Termino", rec.finished_at],
         ["Request ID", rec.request_id],

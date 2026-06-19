@@ -60,7 +60,8 @@ def cgnr(
     p = z.copy()
 
     z_norm_sq = float(z @ z)
-    prev_r_norm_sq = float(r @ r)
+    # epsilon = ||r_i+1||_2 - ||r_i||_2 (diferenca de normas, conforme enunciado)
+    prev_r_norm = float(np.sqrt(r @ r))
 
     n_iter = 0
     for i in range(max_iter):
@@ -76,11 +77,11 @@ def cgnr(
         f = f + alpha * p
         r = r - alpha * w
 
-        new_r_norm_sq = float(r @ r)
-        epsilon = new_r_norm_sq - prev_r_norm_sq
+        new_r_norm = float(np.sqrt(r @ r))
+        epsilon = new_r_norm - prev_r_norm
         if abs(epsilon) < tol:
             break
-        prev_r_norm_sq = new_r_norm_sq
+        prev_r_norm = new_r_norm
 
         z_next = H.T @ r
         z_next_norm_sq = float(z_next @ z_next)

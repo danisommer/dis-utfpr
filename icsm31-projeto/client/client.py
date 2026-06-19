@@ -30,6 +30,7 @@ from typing import List, Optional
 import numpy as np
 import requests
 
+from comparative_report import generate_comparative_report
 from report_generator import ReconstructionResult, generate_report
 
 
@@ -39,6 +40,7 @@ class SignalFile:
 
     path: str
     apply_gain: bool  # True se o sinal e bruto e precisa de ganho
+    model: int  # modelo (1 ou 2) ao qual o sinal pertence
 
 LOG = logging.getLogger("client")
 logging.basicConfig(
@@ -100,19 +102,32 @@ def _discover_signals(data_dir: str, model: int) -> List[SignalFile]:
                 continue
             low = fn.lower()
             if low.startswith("g-") and not low.startswith("g-30x30"):
-                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=True))
+                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=True, model=1))
             elif low.startswith("a-60x60"):
-                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=False))
+                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=False, model=1))
     elif model == 2:
         for fn in files:
             if not _is_signal(fn):
                 continue
             low = fn.lower()
             if low.startswith("g-30x30"):
-                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=True))
+                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=True, model=2))
             elif low.startswith("a-30x30"):
-                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=False))
+                found.append(SignalFile(os.path.join(data_dir, fn), apply_gain=False, model=2))
     return found
+
+
+def _discover_all_signals(data_dir: str) -> List[SignalFile]:
+    """Junta os sinais de todos os modelos em um unico pool.
+
+    O cliente sorteia um sinal deste pool a cada rodada, de modo que o
+    **modelo** (1 ou 2) e o **ganho** (aplicar ou nao, conforme o sinal e bruto
+    ou ja vem com ganho) ficam definidos aleatoriamente, como pede o enunciado.
+    """
+    pool: List[SignalFile] = []
+    for model in (1, 2):
+        pool.extend(_discover_signals(data_dir, model))
+    return pool
 
 
 def _resolve_h_path(data_dir: str, model: int) -> Optional[str]:
@@ -202,6 +217,8 @@ def _send_one(
         image_png_bytes=img_bytes,
         model=model,
         request_id=request_id,
+        reduction_factor=float(data.get("reduction_factor", 0.0)),
+        lambda_reg=float(data.get("lambda_reg", 0.0)),
     )
 
 
@@ -218,23 +235,21 @@ def run_rounds(
 
     all_results: List[ReconstructionResult] = []
 
+    # Pool global de sinais: sorteia-se um a cada rodada, deixando o modelo
+    # (1 ou 2) e o ganho (aplicar ou nao) definidos aleatoriamente.
+    signal_pool = _discover_all_signals(data_dir)
+    if not signal_pool:
+        LOG.error("Nenhum sinal encontrado em %s — nada a fazer.", data_dir)
+        return
+
     with futures.ThreadPoolExecutor(max_workers=2) as pool:
         for round_idx in range(1, rounds + 1):
-            model = rng.choice([1, 2])
             algorithm = rng.choice(["cgnr", "cgne"])
             request_id = uuid.uuid4().hex[:8]
 
-            signals = _discover_signals(data_dir, model)
-            if not signals:
-                LOG.warning(
-                    "[%s] sem sinais para modelo %d em %s — pulando rodada",
-                    request_id,
-                    model,
-                    data_dir,
-                )
-                continue
-
-            signal = rng.choice(signals)
+            # modelo e ganho derivam do sinal sorteado (definicao aleatoria)
+            signal = rng.choice(signal_pool)
+            model = signal.model
             try:
                 g = _load_signal(signal.path)
             except Exception as exc:  # noqa: BLE001
@@ -296,6 +311,10 @@ def run_rounds(
     out_path = os.path.join(report_dir, f"relatorio_{ts}.pdf")
     generate_report(all_results, out_path)
     LOG.info("Relatorio gerado em %s (%d reconstrucoes)", out_path, len(all_results))
+
+    comp_path = os.path.join(report_dir, f"relatorio_comparativo_{ts}.md")
+    generate_comparative_report(all_results, comp_path)
+    LOG.info("Relatorio comparativo gerado em %s", comp_path)
 
 
 def main() -> int:

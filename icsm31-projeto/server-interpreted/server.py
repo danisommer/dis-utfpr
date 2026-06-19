@@ -41,6 +41,7 @@ from PIL import Image, PngImagePlugin
 
 from cgne import cgne
 from cgnr import cgnr
+from params import reduction_factor, regularization_lambda
 from signal_gain import apply_signal_gain
 
 LOG = logging.getLogger("server-interpreted")
@@ -124,10 +125,12 @@ def reconstruct() -> tuple:
     g = np.asarray(g_raw, dtype=np.float64).ravel()
 
     H: Optional[np.ndarray] = None
+    h_key: Optional[str] = None
     if "H" in payload and payload["H"] is not None:
         H = np.asarray(payload["H"], dtype=np.float64)
     elif "H_path" in payload and payload["H_path"]:
-        H = _load_H(payload["H_path"])
+        h_key = payload["H_path"]
+        H = _load_H(h_key)
     else:
         default_path = os.environ.get(f"H_MODEL_{model}_PATH")
         if not default_path:
@@ -145,6 +148,7 @@ def reconstruct() -> tuple:
                 jsonify({"error": f"matriz H do modelo {model} nao encontrada em ./data"}),
                 500,
             )
+        h_key = default_path
         H = _load_H(default_path)
 
     if apply_gain:
@@ -152,6 +156,11 @@ def reconstruct() -> tuple:
             g = apply_signal_gain(g, S=S, N=N)
         except Exception as exc:
             LOG.warning("Falha no ganho de sinal: %s", exc)
+
+    # Parametros do enunciado: c = ||H^T H||_2 (cacheado por H) e
+    # lambda = max(abs(H^T g)) * 0.10 (depende do sinal ja com ganho).
+    c_reduction = reduction_factor(H, cache_key=h_key)
+    lambda_reg = regularization_lambda(H, g)
 
     started_at = datetime.now(timezone.utc)
 
@@ -170,6 +179,8 @@ def reconstruct() -> tuple:
         "finished_at": finished_at.isoformat(),
         "size": f"{width}x{height}",
         "iterations": n_iter,
+        "reduction_factor": f"{c_reduction:.6g}",
+        "lambda_reg": f"{lambda_reg:.6g}",
         "server": "python",
     }
 
@@ -177,11 +188,13 @@ def reconstruct() -> tuple:
     image_b64 = base64.b64encode(png_bytes).decode("ascii")
 
     LOG.info(
-        "reconstruct ok algo=%s model=%d iter=%d tempo=%.4fs",
+        "reconstruct ok algo=%s model=%d iter=%d tempo=%.4fs c=%.4g lambda=%.4g",
         algorithm,
         model,
         n_iter,
         tempo,
+        c_reduction,
+        lambda_reg,
     )
 
     return (
@@ -193,6 +206,8 @@ def reconstruct() -> tuple:
                 "height": height,
                 "n_iter": n_iter,
                 "tempo_reconstrucao_s": tempo,
+                "reduction_factor": c_reduction,
+                "lambda_reg": lambda_reg,
                 "started_at": started_at.isoformat(),
                 "finished_at": finished_at.isoformat(),
                 "server": "python",
